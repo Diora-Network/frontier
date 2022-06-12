@@ -122,9 +122,7 @@ impl FindAuthor<H160> for FindAuthorTruncated {
 		Some(H160::from_str("1234500000000000000000000000000000000000").unwrap())
 	}
 }
-parameter_types! {
-	pub BlockGasLimit: U256 = U256::max_value();
-}
+
 impl crate::Config for Test {
 	type FeeCalculator = FixedGasPrice;
 	type GasWeightMapping = ();
@@ -140,7 +138,7 @@ impl crate::Config for Test {
 	type PrecompilesType = ();
 	type PrecompilesValue = ();
 	type ChainId = ();
-	type BlockGasLimit = BlockGasLimit;
+	type BlockGasLimit = ();
 	type OnChargeTransaction = ();
 	type BlockHashMapping = crate::SubstrateBlockHashMapping<Self>;
 	type FindAuthor = FindAuthorTruncated;

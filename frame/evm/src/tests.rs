@@ -452,8 +452,7 @@ fn runner_non_transactional_calls_with_non_balance_accounts_is_ok_without_gas_pr
 			None,
 			None,
 			Vec::new(),
-			false, // non-transactional
-			true,  // must be validated
+			false,
 			&<Test as Config>::config().clone(),
 		)
 		.expect("Non transactional call succeeds");
@@ -486,8 +485,7 @@ fn runner_non_transactional_calls_with_non_balance_accounts_is_err_with_gas_pric
 			None,
 			None,
 			Vec::new(),
-			false, // non-transactional
-			true,  // must be validated
+			false,
 			&<Test as Config>::config().clone(),
 		);
 		assert!(res.is_err());
@@ -508,8 +506,7 @@ fn runner_transactional_call_with_zero_gas_price_fails() {
 			None,
 			None,
 			Vec::new(),
-			true, // transactional
-			true, // must be validated
+			true,
 			&<Test as Config>::config().clone(),
 		);
 		assert!(res.is_err());
@@ -530,8 +527,7 @@ fn runner_max_fee_per_gas_gte_max_priority_fee_per_gas() {
 			Some(U256::from(2_000_000_000)),
 			None,
 			Vec::new(),
-			true, // transactional
-			true, // must be validated
+			true,
 			&<Test as Config>::config().clone(),
 		);
 		assert!(res.is_err());
@@ -545,8 +541,7 @@ fn runner_max_fee_per_gas_gte_max_priority_fee_per_gas() {
 			Some(U256::from(2_000_000_000)),
 			None,
 			Vec::new(),
-			false, // non-transactional
-			true,  // must be validated
+			false,
 			&<Test as Config>::config().clone(),
 		);
 		assert!(res.is_err());

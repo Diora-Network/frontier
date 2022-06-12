@@ -17,8 +17,8 @@
 // along with this program. If not, see <https://www.gnu.org/licenses/>.
 
 use ethereum_types::H256;
-use futures::future::TryFutureExt;
-use jsonrpsee::core::RpcResult as Result;
+use futures::future::{FutureExt, TryFutureExt};
+use jsonrpc_core::{futures::future, BoxFuture, Result};
 
 use sc_client_api::backend::{Backend, StateBackend, StorageProvider};
 use sc_network::ExHashT;
@@ -50,18 +50,18 @@ where
 	CT: ConvertTransaction<<B as BlockT>::Extrinsic> + Send + Sync + 'static,
 	A: ChainApi<Block = B> + 'static,
 {
-	pub async fn send_transaction(&self, request: TransactionRequest) -> Result<H256> {
+	pub fn send_transaction(&self, request: TransactionRequest) -> BoxFuture<Result<H256>> {
 		let from = match request.from {
 			Some(from) => from,
 			None => {
 				let accounts = match self.accounts() {
 					Ok(accounts) => accounts,
-					Err(e) => return Err(e),
+					Err(e) => return future::err(e).boxed(),
 				};
 
 				match accounts.get(0) {
 					Some(account) => *account,
-					None => return Err(internal_err("no signer available")),
+					None => return future::err(internal_err("no signer available")).boxed(),
 				}
 			}
 		};
@@ -70,14 +70,14 @@ where
 			Some(nonce) => nonce,
 			None => match self.transaction_count(from, None) {
 				Ok(nonce) => nonce,
-				Err(e) => return Err(e),
+				Err(e) => return future::err(e).boxed(),
 			},
 		};
 
 		let chain_id = match self.chain_id() {
 			Ok(Some(chain_id)) => chain_id.as_u64(),
-			Ok(None) => return Err(internal_err("chain id not available")),
-			Err(e) => return Err(e),
+			Ok(None) => return future::err(internal_err("chain id not available")).boxed(),
+			Err(e) => return future::err(e).boxed(),
 		};
 
 		let hash = self.client.info().best_hash;
@@ -93,7 +93,8 @@ where
 				if let Ok(Some(block)) = block {
 					block.header.gas_limit
 				} else {
-					return Err(internal_err("block unavailable, cannot query gas limit"));
+					return future::err(internal_err("block unavailable, cannot query gas limit"))
+						.boxed();
 				}
 			}
 		};
@@ -127,7 +128,7 @@ where
 				}
 				TransactionMessage::EIP1559(m)
 			}
-			_ => return Err(internal_err("invalid transaction parameters")),
+			_ => return future::err(internal_err("invalid transaction parameters")).boxed(),
 		};
 
 		let mut transaction = None;
@@ -136,7 +137,7 @@ where
 			if signer.accounts().contains(&from) {
 				match signer.sign(message, &from) {
 					Ok(t) => transaction = Some(t),
-					Err(e) => return Err(e),
+					Err(e) => return future::err(e).boxed(),
 				}
 				break;
 			}
@@ -144,7 +145,7 @@ where
 
 		let transaction = match transaction {
 			Some(transaction) => transaction,
-			None => return Err(internal_err("no signer available")),
+			None => return future::err(internal_err("no signer available")).boxed(),
 		};
 		let transaction_hash = transaction.hash();
 
@@ -155,7 +156,7 @@ where
 			.api_version::<dyn ConvertTransactionRuntimeApi<B>>(&block_hash)
 		{
 			Ok(api_version) => api_version,
-			_ => return Err(internal_err("cannot access runtime api")),
+			_ => return future::err(internal_err("cannot access runtime api")).boxed(),
 		};
 
 		let extrinsic = match api_version {
@@ -165,92 +166,7 @@ where
 				.convert_transaction(&block_hash, transaction)
 			{
 				Ok(extrinsic) => extrinsic,
-				Err(_) => return Err(internal_err("cannot access runtime api")),
-			},
-			Some(1) => {
-				if let ethereum::TransactionV2::Legacy(legacy_transaction) = transaction {
-					// To be compatible with runtimes that do not support transactions v2
-					#[allow(deprecated)]
-					match self
-						.client
-						.runtime_api()
-						.convert_transaction_before_version_2(&block_hash, legacy_transaction)
-					{
-						Ok(extrinsic) => extrinsic,
-						Err(_) => return Err(internal_err("cannot access runtime api")),
-					}
-				} else {
-					return Err(internal_err("This runtime not support eth transactions v2"));
-				}
-			}
-			None => {
-				if let Some(ref convert_transaction) = self.convert_transaction {
-					convert_transaction.convert_transaction(transaction.clone())
-				} else {
-					return Err(internal_err(
-						"No TransactionConverter is provided and the runtime api ConvertTransactionRuntimeApi is not found"
-					));
-				}
-			}
-			_ => {
-				return Err(internal_err(
-					"ConvertTransactionRuntimeApi version not supported",
-				))
-			}
-		};
-
-		self.pool
-			.submit_one(&block_hash, TransactionSource::Local, extrinsic)
-			.map_ok(move |_| transaction_hash)
-			.map_err(|err| internal_err(format!("submit transaction to pool failed: {:?}", err)))
-			.await
-	}
-
-	pub async fn send_raw_transaction(&self, bytes: Bytes) -> Result<H256> {
-		let slice = &bytes.0[..];
-		if slice.is_empty() {
-			return Err(internal_err("transaction data is empty"));
-		}
-		let first = slice.get(0).unwrap();
-		let transaction = if first > &0x7f {
-			// Legacy transaction. Decode and wrap in envelope.
-			match rlp::decode::<ethereum::TransactionV0>(slice) {
-				Ok(transaction) => ethereum::TransactionV2::Legacy(transaction),
-				Err(_) => return Err(internal_err("decode transaction failed")),
-			}
-		} else {
-			// Typed Transaction.
-			// `ethereum` crate decode implementation for `TransactionV2` expects a valid rlp input,
-			// and EIP-1559 breaks that assumption by prepending a version byte.
-			// We re-encode the payload input to get a valid rlp, and the decode implementation will strip
-			// them to check the transaction version byte.
-			let extend = rlp::encode(&slice);
-			match rlp::decode::<ethereum::TransactionV2>(&extend[..]) {
-				Ok(transaction) => transaction,
-				Err(_) => return Err(internal_err("decode transaction failed")),
-			}
-		};
-
-		let transaction_hash = transaction.hash();
-
-		let block_hash = BlockId::hash(self.client.info().best_hash);
-		let api_version = match self
-			.client
-			.runtime_api()
-			.api_version::<dyn ConvertTransactionRuntimeApi<B>>(&block_hash)
-		{
-			Ok(api_version) => api_version,
-			_ => return Err(internal_err("cannot access runtime api")),
-		};
-
-		let extrinsic = match api_version {
-			Some(2) => match self
-				.client
-				.runtime_api()
-				.convert_transaction(&block_hash, transaction)
-			{
-				Ok(extrinsic) => extrinsic,
-				Err(_) => return Err(internal_err("cannot access runtime api")),
+				Err(_) => return future::err(internal_err("cannot access runtime api")).boxed(),
 			},
 			Some(1) => {
 				if let ethereum::TransactionV2::Legacy(legacy_transaction) = transaction {
@@ -263,33 +179,134 @@ where
 					{
 						Ok(extrinsic) => extrinsic,
 						Err(_) => {
-							return Err(internal_err("cannot access runtime api"));
+							return future::err(internal_err("cannot access runtime api")).boxed()
 						}
 					}
 				} else {
-					return Err(internal_err("This runtime not support eth transactions v2"));
+					return future::err(internal_err(
+						"This runtime not support eth transactions v2",
+					))
+					.boxed();
 				}
 			}
 			None => {
 				if let Some(ref convert_transaction) = self.convert_transaction {
 					convert_transaction.convert_transaction(transaction.clone())
 				} else {
-					return Err(internal_err(
+					return future::err(internal_err(
 						"No TransactionConverter is provided and the runtime api ConvertTransactionRuntimeApi is not found"
-					));
+					)).boxed();
 				}
 			}
 			_ => {
-				return Err(internal_err(
+				return future::err(internal_err(
 					"ConvertTransactionRuntimeApi version not supported",
 				))
+				.boxed()
 			}
 		};
 
-		self.pool
-			.submit_one(&block_hash, TransactionSource::Local, extrinsic)
-			.map_ok(move |_| transaction_hash)
-			.map_err(|err| internal_err(format!("submit transaction to pool failed: {:?}", err)))
-			.await
+		Box::pin(
+			self.pool
+				.submit_one(&block_hash, TransactionSource::Local, extrinsic)
+				.map_ok(move |_| transaction_hash)
+				.map_err(|err| {
+					internal_err(format!("submit transaction to pool failed: {:?}", err))
+				}),
+		)
+	}
+
+	pub fn send_raw_transaction(&self, bytes: Bytes) -> BoxFuture<Result<H256>> {
+		let slice = &bytes.0[..];
+		if slice.is_empty() {
+			return future::err(internal_err("transaction data is empty")).boxed();
+		}
+		let first = slice.get(0).unwrap();
+		let transaction = if first > &0x7f {
+			// Legacy transaction. Decode and wrap in envelope.
+			match rlp::decode::<ethereum::TransactionV0>(slice) {
+				Ok(transaction) => ethereum::TransactionV2::Legacy(transaction),
+				Err(_) => return future::err(internal_err("decode transaction failed")).boxed(),
+			}
+		} else {
+			// Typed Transaction.
+			// `ethereum` crate decode implementation for `TransactionV2` expects a valid rlp input,
+			// and EIP-1559 breaks that assumption by prepending a version byte.
+			// We re-encode the payload input to get a valid rlp, and the decode implementation will strip
+			// them to check the transaction version byte.
+			let extend = rlp::encode(&slice);
+			match rlp::decode::<ethereum::TransactionV2>(&extend[..]) {
+				Ok(transaction) => transaction,
+				Err(_) => return future::err(internal_err("decode transaction failed")).boxed(),
+			}
+		};
+
+		let transaction_hash = transaction.hash();
+
+		let block_hash = BlockId::hash(self.client.info().best_hash);
+		let api_version = match self
+			.client
+			.runtime_api()
+			.api_version::<dyn ConvertTransactionRuntimeApi<B>>(&block_hash)
+		{
+			Ok(api_version) => api_version,
+			_ => return future::err(internal_err("cannot access runtime api")).boxed(),
+		};
+
+		let extrinsic = match api_version {
+			Some(2) => match self
+				.client
+				.runtime_api()
+				.convert_transaction(&block_hash, transaction)
+			{
+				Ok(extrinsic) => extrinsic,
+				Err(_) => return future::err(internal_err("cannot access runtime api")).boxed(),
+			},
+			Some(1) => {
+				if let ethereum::TransactionV2::Legacy(legacy_transaction) = transaction {
+					// To be compatible with runtimes that do not support transactions v2
+					#[allow(deprecated)]
+					match self
+						.client
+						.runtime_api()
+						.convert_transaction_before_version_2(&block_hash, legacy_transaction)
+					{
+						Ok(extrinsic) => extrinsic,
+						Err(_) => {
+							return future::err(internal_err("cannot access runtime api")).boxed();
+						}
+					}
+				} else {
+					return future::err(internal_err(
+						"This runtime not support eth transactions v2",
+					))
+					.boxed();
+				}
+			}
+			None => {
+				if let Some(ref convert_transaction) = self.convert_transaction {
+					convert_transaction.convert_transaction(transaction.clone())
+				} else {
+					return future::err(internal_err(
+						"No TransactionConverter is provided and the runtime api ConvertTransactionRuntimeApi is not found"
+					)).boxed();
+				}
+			}
+			_ => {
+				return future::err(internal_err(
+					"ConvertTransactionRuntimeApi version not supported",
+				))
+				.boxed()
+			}
+		};
+
+		Box::pin(
+			self.pool
+				.submit_one(&block_hash, TransactionSource::Local, extrinsic)
+				.map_ok(move |_| transaction_hash)
+				.map_err(|err| {
+					internal_err(format!("submit transaction to pool failed: {:?}", err))
+				}),
+		)
 	}
 }

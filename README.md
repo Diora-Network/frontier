@@ -55,7 +55,9 @@ functionalities of the EVM executor.
   ![Crates.io](https://img.shields.io/crates/v/pallet-evm-precompile-modexp)
 * `pallet-evm-precompile-sha3fips`: Standard SHA3 precompile.
   ![Crates.io](https://img.shields.io/crates/v/pallet-evm-precompile-sha3fips)
-
+* `pallet-evm-precompile-dispatch`: Enable interoperability between EVM
+  contracts and other Substrate runtime components.
+  ![Crates.io](https://img.shields.io/crates/v/pallet-evm-precompile-dispatch)
 
 ### Client-side libraries
 

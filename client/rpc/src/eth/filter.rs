@@ -20,7 +20,7 @@ use std::{collections::BTreeMap, marker::PhantomData, sync::Arc, time};
 
 use ethereum::BlockV2 as EthereumBlock;
 use ethereum_types::{H256, U256};
-use jsonrpsee::core::{async_trait, RpcResult as Result};
+use jsonrpc_core::{BoxFuture, Result};
 
 use sc_client_api::backend::{Backend, StateBackend, StorageProvider};
 use sp_api::ProvideRuntimeApi;
@@ -34,7 +34,7 @@ use sp_runtime::{
 	},
 };
 
-use fc_rpc_core::{types::*, EthFilterApiServer};
+use fc_rpc_core::{types::*, EthFilterApi};
 use fp_rpc::{EthereumRuntimeRPCApi, TransactionStatus};
 use fp_storage::EthereumStorageSchema;
 
@@ -109,8 +109,7 @@ where
 	}
 }
 
-#[async_trait]
-impl<B, C, BE> EthFilterApiServer for EthFilter<B, C, BE>
+impl<B, C, BE> EthFilterApi for EthFilter<B, C, BE>
 where
 	B: BlockT<Hash = H256> + Send + Sync + 'static,
 	C: ProvideRuntimeApi<B> + StorageProvider<B, BE>,
@@ -131,7 +130,7 @@ where
 		Err(internal_err("Method not available."))
 	}
 
-	async fn filter_changes(&self, index: Index) -> Result<FilterChanges> {
+	fn filter_changes(&self, index: Index) -> BoxFuture<Result<FilterChanges>> {
 		// There are multiple branches that needs to return async blocks.
 		// Also, each branch need to (synchronously) do stuff with the pool
 		// (behind a lock), and the lock should be released before entering
@@ -150,7 +149,7 @@ where
 				from_number: NumberFor<B>,
 				current_number: NumberFor<B>,
 			},
-			Error(jsonrpsee::core::Error),
+			Error(jsonrpc_core::Error),
 		}
 
 		let key = U256::from(index.value());
@@ -239,52 +238,55 @@ where
 		let backend = Arc::clone(&self.backend);
 		let max_past_logs = self.max_past_logs;
 
-		match path {
-			FuturePath::Error(err) => Err(err),
-			FuturePath::Block { last, next } => {
-				let mut ethereum_hashes: Vec<H256> = Vec::new();
-				for n in last..next {
-					let id = BlockId::Number(n.unique_saturated_into());
-					let substrate_hash = client.expect_block_hash_from_id(&id).map_err(|_| {
-						internal_err(format!("Expect block number from id: {}", id))
-					})?;
+		Box::pin(async move {
+			match path {
+				FuturePath::Error(err) => Err(err),
+				FuturePath::Block { last, next } => {
+					let mut ethereum_hashes: Vec<H256> = Vec::new();
+					for n in last..next {
+						let id = BlockId::Number(n.unique_saturated_into());
+						let substrate_hash =
+							client.expect_block_hash_from_id(&id).map_err(|_| {
+								internal_err(format!("Expect block number from id: {}", id))
+							})?;
 
-					let schema = frontier_backend_client::onchain_storage_schema::<B, C, BE>(
-						client.as_ref(),
-						id,
-					);
+						let schema = frontier_backend_client::onchain_storage_schema::<B, C, BE>(
+							client.as_ref(),
+							id,
+						);
 
-					let block = block_data_cache.current_block(schema, substrate_hash).await;
-					if let Some(block) = block {
-						ethereum_hashes.push(block.header.hash())
+						let block = block_data_cache.current_block(schema, substrate_hash).await;
+						if let Some(block) = block {
+							ethereum_hashes.push(block.header.hash())
+						}
 					}
+					Ok(FilterChanges::Hashes(ethereum_hashes))
 				}
-				Ok(FilterChanges::Hashes(ethereum_hashes))
-			}
-			FuturePath::Log {
-				filter,
-				from_number,
-				current_number,
-			} => {
-				let mut ret: Vec<Log> = Vec::new();
-				let _ = filter_range_logs(
-					client.as_ref(),
-					backend.as_ref(),
-					&block_data_cache,
-					&mut ret,
-					max_past_logs,
-					&filter,
+				FuturePath::Log {
+					filter,
 					from_number,
 					current_number,
-				)
-				.await?;
+				} => {
+					let mut ret: Vec<Log> = Vec::new();
+					let _ = filter_range_logs(
+						client.as_ref(),
+						backend.as_ref(),
+						&block_data_cache,
+						&mut ret,
+						max_past_logs,
+						&filter,
+						from_number,
+						current_number,
+					)
+					.await?;
 
-				Ok(FilterChanges::Logs(ret))
+					Ok(FilterChanges::Logs(ret))
+				}
 			}
-		}
+		})
 	}
 
-	async fn filter_logs(&self, index: Index) -> Result<Vec<Log>> {
+	fn filter_logs(&self, index: Index) -> BoxFuture<Result<Vec<Log>>> {
 		let key = U256::from(index.value());
 		let pool = self.filter_pool.clone();
 
@@ -313,42 +315,44 @@ where
 		let backend = Arc::clone(&self.backend);
 		let max_past_logs = self.max_past_logs;
 
-		let filter = filter_result?;
+		Box::pin(async move {
+			let filter = filter_result?;
 
-		let best_number = client.info().best_number;
-		let mut current_number = filter
-			.to_block
-			.and_then(|v| v.to_min_block_num())
-			.map(|s| s.unique_saturated_into())
-			.unwrap_or(best_number);
+			let best_number = client.info().best_number;
+			let mut current_number = filter
+				.to_block
+				.and_then(|v| v.to_min_block_num())
+				.map(|s| s.unique_saturated_into())
+				.unwrap_or(best_number);
 
-		if current_number > best_number {
-			current_number = best_number;
-		}
+			if current_number > best_number {
+				current_number = best_number;
+			}
 
-		if current_number > client.info().best_number {
-			current_number = client.info().best_number;
-		}
+			if current_number > client.info().best_number {
+				current_number = client.info().best_number;
+			}
 
-		let from_number = filter
-			.from_block
-			.and_then(|v| v.to_min_block_num())
-			.map(|s| s.unique_saturated_into())
-			.unwrap_or(client.info().best_number);
+			let from_number = filter
+				.from_block
+				.and_then(|v| v.to_min_block_num())
+				.map(|s| s.unique_saturated_into())
+				.unwrap_or(client.info().best_number);
 
-		let mut ret: Vec<Log> = Vec::new();
-		let _ = filter_range_logs(
-			client.as_ref(),
-			backend.as_ref(),
-			&block_data_cache,
-			&mut ret,
-			max_past_logs,
-			&filter,
-			from_number,
-			current_number,
-		)
-		.await?;
-		Ok(ret)
+			let mut ret: Vec<Log> = Vec::new();
+			let _ = filter_range_logs(
+				client.as_ref(),
+				backend.as_ref(),
+				&block_data_cache,
+				&mut ret,
+				max_past_logs,
+				&filter,
+				from_number,
+				current_number,
+			)
+			.await?;
+			Ok(ret)
+		})
 	}
 
 	fn uninstall_filter(&self, index: Index) -> Result<bool> {
@@ -367,65 +371,69 @@ where
 		response
 	}
 
-	async fn logs(&self, filter: Filter) -> Result<Vec<Log>> {
+	fn logs(&self, filter: Filter) -> BoxFuture<Result<Vec<Log>>> {
 		let client = Arc::clone(&self.client);
 		let block_data_cache = Arc::clone(&self.block_data_cache);
 		let backend = Arc::clone(&self.backend);
 		let max_past_logs = self.max_past_logs;
 
-		let mut ret: Vec<Log> = Vec::new();
-		if let Some(hash) = filter.block_hash {
-			let id = match frontier_backend_client::load_hash::<B>(backend.as_ref(), hash)
-				.map_err(|err| internal_err(format!("{:?}", err)))?
-			{
-				Some(hash) => hash,
-				_ => return Ok(Vec::new()),
-			};
-			let substrate_hash = client
-				.expect_block_hash_from_id(&id)
-				.map_err(|_| internal_err(format!("Expect block number from id: {}", id)))?;
+		Box::pin(async move {
+			let mut ret: Vec<Log> = Vec::new();
+			if let Some(hash) = filter.block_hash {
+				let id = match frontier_backend_client::load_hash::<B>(backend.as_ref(), hash)
+					.map_err(|err| internal_err(format!("{:?}", err)))?
+				{
+					Some(hash) => hash,
+					_ => return Ok(Vec::new()),
+				};
+				let substrate_hash = client
+					.expect_block_hash_from_id(&id)
+					.map_err(|_| internal_err(format!("Expect block number from id: {}", id)))?;
 
-			let schema =
-				frontier_backend_client::onchain_storage_schema::<B, C, BE>(client.as_ref(), id);
+				let schema = frontier_backend_client::onchain_storage_schema::<B, C, BE>(
+					client.as_ref(),
+					id,
+				);
 
-			let block = block_data_cache.current_block(schema, substrate_hash).await;
-			let statuses = block_data_cache
-				.current_transaction_statuses(schema, substrate_hash)
-				.await;
-			if let (Some(block), Some(statuses)) = (block, statuses) {
-				filter_block_logs(&mut ret, &filter, block, statuses);
+				let block = block_data_cache.current_block(schema, substrate_hash).await;
+				let statuses = block_data_cache
+					.current_transaction_statuses(schema, substrate_hash)
+					.await;
+				if let (Some(block), Some(statuses)) = (block, statuses) {
+					filter_block_logs(&mut ret, &filter, block, statuses);
+				}
+			} else {
+				let best_number = client.info().best_number;
+				let mut current_number = filter
+					.to_block
+					.and_then(|v| v.to_min_block_num())
+					.map(|s| s.unique_saturated_into())
+					.unwrap_or(best_number);
+
+				if current_number > best_number {
+					current_number = best_number;
+				}
+
+				let from_number = filter
+					.from_block
+					.and_then(|v| v.to_min_block_num())
+					.map(|s| s.unique_saturated_into())
+					.unwrap_or(client.info().best_number);
+
+				let _ = filter_range_logs(
+					client.as_ref(),
+					backend.as_ref(),
+					&block_data_cache,
+					&mut ret,
+					max_past_logs,
+					&filter,
+					from_number,
+					current_number,
+				)
+				.await?;
 			}
-		} else {
-			let best_number = client.info().best_number;
-			let mut current_number = filter
-				.to_block
-				.and_then(|v| v.to_min_block_num())
-				.map(|s| s.unique_saturated_into())
-				.unwrap_or(best_number);
-
-			if current_number > best_number {
-				current_number = best_number;
-			}
-
-			let from_number = filter
-				.from_block
-				.and_then(|v| v.to_min_block_num())
-				.map(|s| s.unique_saturated_into())
-				.unwrap_or(client.info().best_number);
-
-			let _ = filter_range_logs(
-				client.as_ref(),
-				backend.as_ref(),
-				&block_data_cache,
-				&mut ret,
-				max_past_logs,
-				&filter,
-				from_number,
-				current_number,
-			)
-			.await?;
-		}
-		Ok(ret)
+			Ok(ret)
+		})
 	}
 }
 

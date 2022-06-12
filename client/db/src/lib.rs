@@ -20,11 +20,7 @@
 mod parity_db_adapter;
 mod utils;
 
-use std::{
-	marker::PhantomData,
-	path::{Path, PathBuf},
-	sync::Arc,
-};
+use std::{marker::PhantomData, sync::Arc};
 
 use codec::{Decode, Encode};
 use fp_storage::{EthereumStorageSchema, PALLET_ETHEREUM_SCHEMA_CACHE};
@@ -53,7 +49,7 @@ pub(crate) mod columns {
 	pub const SYNCED_MAPPING: u32 = 3;
 }
 
-pub mod static_keys {
+pub(crate) mod static_keys {
 	pub const CURRENT_SYNCING_TIPS: &[u8] = b"CURRENT_SYNCING_TIPS";
 }
 
@@ -62,34 +58,7 @@ pub struct Backend<Block: BlockT> {
 	mapping: Arc<MappingDb<Block>>,
 }
 
-/// Returns the frontier database directory.
-pub fn frontier_database_dir(db_config_dir: &Path, db_path: &str) -> PathBuf {
-	db_config_dir.join("frontier").join(db_path)
-}
-
 impl<Block: BlockT> Backend<Block> {
-	pub fn open(database: &DatabaseSource, db_config_dir: &Path) -> Result<Self, String> {
-		Self::new(&DatabaseSettings {
-			source: match database {
-				DatabaseSource::RocksDb { .. } => DatabaseSource::RocksDb {
-					path: frontier_database_dir(db_config_dir, "db"),
-					cache_size: 0,
-				},
-				DatabaseSource::ParityDb { .. } => DatabaseSource::ParityDb {
-					path: frontier_database_dir(db_config_dir, "paritydb"),
-				},
-				DatabaseSource::Auto { .. } => DatabaseSource::Auto {
-					rocksdb_path: frontier_database_dir(db_config_dir, "db"),
-					paritydb_path: frontier_database_dir(db_config_dir, "paritydb"),
-					cache_size: 0,
-				},
-				_ => {
-					return Err("Supported db sources: `rocksdb` | `paritydb` | `auto`".to_string())
-				}
-			},
-		})
-	}
-
 	pub fn new(config: &DatabaseSettings) -> Result<Self, String> {
 		let db = utils::open_database(config)?;
 
@@ -181,14 +150,13 @@ impl<Block: BlockT> MetaDb<Block> {
 	}
 }
 
-#[derive(Debug)]
 pub struct MappingCommitment<Block: BlockT> {
 	pub block_hash: Block::Hash,
 	pub ethereum_block_hash: H256,
 	pub ethereum_transaction_hashes: Vec<H256>,
 }
 
-#[derive(Clone, Encode, Debug, Decode, PartialEq)]
+#[derive(Clone, Encode, Decode)]
 pub struct TransactionMetadata<Block: BlockT> {
 	pub block_hash: Block::Hash,
 	pub ethereum_block_hash: H256,

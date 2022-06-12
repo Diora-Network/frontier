@@ -18,7 +18,8 @@
 
 //! Net rpc interface.
 
-use jsonrpsee::{core::RpcResult as Result, proc_macros::rpc};
+use jsonrpc_core::Result;
+use jsonrpc_derive::rpc;
 
 use crate::types::PeerCount;
 
@@ -26,15 +27,15 @@ use crate::types::PeerCount;
 #[rpc(server)]
 pub trait NetApi {
 	/// Returns protocol version.
-	#[method(name = "net_version")]
+	#[rpc(name = "net_version")]
 	fn version(&self) -> Result<String>;
 
 	/// Returns number of peers connected to node.
-	#[method(name = "net_peerCount")]
+	#[rpc(name = "net_peerCount")]
 	fn peer_count(&self) -> Result<PeerCount>;
 
 	/// Returns true if client is actively listening for network connections.
 	/// Otherwise false.
-	#[method(name = "net_listening")]
+	#[rpc(name = "net_listening")]
 	fn is_listening(&self) -> Result<bool>;
 }
