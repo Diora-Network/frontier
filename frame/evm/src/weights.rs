@@ -29,7 +29,7 @@
 // --execution=wasm
 // --wasm-execution=compiled
 // --pallet
-// pallet_hotfix_sufficients
+// pallet_evm
 // --extrinsic
 // hotfix_inc_account_sufficients
 // --steps
