@@ -15,12 +15,14 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::fs;
+
 use evm::{Context, ExitError, ExitReason, ExitSucceed, Transfer};
 use fp_evm::{Precompile, PrecompileHandle};
 use sp_core::{H160, H256};
-use std::fs;
 
-#[derive(serde::Deserialize, Debug)]
+#[derive(Debug, serde::Deserialize)]
+#[serde(rename_all = "PascalCase")]
 struct EthConsensusTest {
 	input: String,
 	expected: String,

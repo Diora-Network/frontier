@@ -19,7 +19,7 @@
 use std::sync::Arc;
 
 use ethereum_types::{H256, U256};
-use jsonrpc_core::{BoxFuture, Result};
+use jsonrpsee::core::RpcResult as Result;
 
 use sc_client_api::backend::{Backend, StateBackend, StorageProvider};
 use sc_network::ExHashT;
@@ -43,144 +43,147 @@ where
 	BE: Backend<B> + 'static,
 	BE::State: StateBackend<BlakeTwo256>,
 {
-	pub fn block_by_hash(&self, hash: H256, full: bool) -> BoxFuture<Result<Option<RichBlock>>> {
+	pub async fn block_by_hash(&self, hash: H256, full: bool) -> Result<Option<RichBlock>> {
 		let client = Arc::clone(&self.client);
 		let overrides = Arc::clone(&self.overrides);
 		let block_data_cache = Arc::clone(&self.block_data_cache);
 		let backend = Arc::clone(&self.backend);
 
-		Box::pin(async move {
-			let id = match frontier_backend_client::load_hash::<B>(backend.as_ref(), hash)
-				.map_err(|err| internal_err(format!("{:?}", err)))?
-			{
-				Some(hash) => hash,
-				_ => return Ok(None),
-			};
-			let substrate_hash = client
-				.expect_block_hash_from_id(&id)
-				.map_err(|_| internal_err(format!("Expect block number from id: {}", id)))?;
+		let id = match frontier_backend_client::load_hash::<B>(backend.as_ref(), hash)
+			.map_err(|err| internal_err(format!("{:?}", err)))?
+		{
+			Some(hash) => hash,
+			_ => return Ok(None),
+		};
+		let substrate_hash = client
+			.expect_block_hash_from_id(&id)
+			.map_err(|_| internal_err(format!("Expect block number from id: {}", id)))?;
 
-			let schema =
-				frontier_backend_client::onchain_storage_schema::<B, C, BE>(client.as_ref(), id);
-			let handler = overrides
-				.schemas
-				.get(&schema)
-				.unwrap_or(&overrides.fallback);
+		let schema =
+			frontier_backend_client::onchain_storage_schema::<B, C, BE>(client.as_ref(), id);
+		let handler = overrides
+			.schemas
+			.get(&schema)
+			.unwrap_or(&overrides.fallback);
 
-			let block = block_data_cache.current_block(schema, substrate_hash).await;
-			let statuses = block_data_cache
-				.current_transaction_statuses(schema, substrate_hash)
-				.await;
+		let block = block_data_cache.current_block(schema, substrate_hash).await;
+		let statuses = block_data_cache
+			.current_transaction_statuses(schema, substrate_hash)
+			.await;
 
-			let base_fee = handler.base_fee(&id);
+		let base_fee = handler.base_fee(&id);
 
-			match (block, statuses) {
-				(Some(block), Some(statuses)) => {
-					let mut rich_block = rich_block_build(
-						block,
-						statuses.into_iter().map(|s| Some(s)).collect(),
-						Some(hash),
-						full,
-						base_fee,
-					);
-					// Indexers heavily rely on the parent hash.
-					// Moonbase client-level patch for inconsistent runtime 1200 state.
-					let number = rich_block.inner.header.number.unwrap_or_default();
-					if rich_block.inner.header.parent_hash == H256::default()
-						&& number > U256::zero() {
+		match (block, statuses) {
+			(Some(block), Some(statuses)) => {
+				let mut rich_block = rich_block_build(
+					block,
+					statuses.into_iter().map(|s| Some(s)).collect(),
+					Some(hash),
+					full,
+					base_fee,
+				);
+				// Indexers heavily rely on the parent hash.
+				// Moonbase client-level patch for inconsistent runtime 1200 state.
+				let number = rich_block.inner.header.number.unwrap_or_default();
+				if rich_block.inner.header.parent_hash == H256::default() && number > U256::zero() {
+					let id = BlockId::Hash(substrate_hash);
+					if let Ok(Some(header)) = client.header(id) {
+						let parent_hash = *header.parent_hash();
 
-							let id = BlockId::Hash(substrate_hash);
-							if let Ok(Some(header)) = client.header(id) {
-								let parent_hash = *header.parent_hash();
-
-								let parent_id = BlockId::Hash(parent_hash);
-								let schema =
-									frontier_backend_client::onchain_storage_schema::<B, C, BE>(client.as_ref(), parent_id);
-								if let Some(block) = block_data_cache.current_block(schema, parent_hash).await {
-									rich_block.inner.header.parent_hash =
-										H256::from_slice(keccak_256(&rlp::encode(&block.header)).as_slice());
-								}
-							}
+						let parent_id = BlockId::Hash(parent_hash);
+						let schema = frontier_backend_client::onchain_storage_schema::<B, C, BE>(
+							client.as_ref(),
+							parent_id,
+						);
+						if let Some(block) =
+							block_data_cache.current_block(schema, parent_hash).await
+						{
+							rich_block.inner.header.parent_hash = H256::from_slice(
+								keccak_256(&rlp::encode(&block.header)).as_slice(),
+							);
+						}
 					}
-					Ok(Some(rich_block))
-				},
-				_ => Ok(None),
+				}
+				Ok(Some(rich_block))
 			}
-		})
+			_ => Ok(None),
+		}
 	}
 
-	pub fn block_by_number(
+	pub async fn block_by_number(
 		&self,
 		number: BlockNumber,
 		full: bool,
-	) -> BoxFuture<Result<Option<RichBlock>>> {
+	) -> Result<Option<RichBlock>> {
 		let client = Arc::clone(&self.client);
 		let overrides = Arc::clone(&self.overrides);
 		let block_data_cache = Arc::clone(&self.block_data_cache);
 		let backend = Arc::clone(&self.backend);
 
-		Box::pin(async move {
-			let id = match frontier_backend_client::native_block_id::<B, C>(
-				client.as_ref(),
-				backend.as_ref(),
-				Some(number),
-			)? {
-				Some(id) => id,
-				None => return Ok(None),
-			};
-			let substrate_hash = client
-				.expect_block_hash_from_id(&id)
-				.map_err(|_| internal_err(format!("Expect block number from id: {}", id)))?;
+		let id = match frontier_backend_client::native_block_id::<B, C>(
+			client.as_ref(),
+			backend.as_ref(),
+			Some(number),
+		)? {
+			Some(id) => id,
+			None => return Ok(None),
+		};
+		let substrate_hash = client
+			.expect_block_hash_from_id(&id)
+			.map_err(|_| internal_err(format!("Expect block number from id: {}", id)))?;
 
-			let schema =
-				frontier_backend_client::onchain_storage_schema::<B, C, BE>(client.as_ref(), id);
-			let handler = overrides
-				.schemas
-				.get(&schema)
-				.unwrap_or(&overrides.fallback);
+		let schema =
+			frontier_backend_client::onchain_storage_schema::<B, C, BE>(client.as_ref(), id);
+		let handler = overrides
+			.schemas
+			.get(&schema)
+			.unwrap_or(&overrides.fallback);
 
-			let block = block_data_cache.current_block(schema, substrate_hash).await;
-			let statuses = block_data_cache
-				.current_transaction_statuses(schema, substrate_hash)
-				.await;
+		let block = block_data_cache.current_block(schema, substrate_hash).await;
+		let statuses = block_data_cache
+			.current_transaction_statuses(schema, substrate_hash)
+			.await;
 
-			let base_fee = handler.base_fee(&id);
+		let base_fee = handler.base_fee(&id);
 
-			match (block, statuses) {
-				(Some(block), Some(statuses)) => {
-					let hash = H256::from(keccak_256(&rlp::encode(&block.header)));
+		match (block, statuses) {
+			(Some(block), Some(statuses)) => {
+				let hash = H256::from(keccak_256(&rlp::encode(&block.header)));
 
-					let mut rich_block = rich_block_build(
-						block,
-						statuses.into_iter().map(Option::Some).collect(),
-						Some(hash),
-						full,
-						base_fee,
-					);
-					// Indexers heavily rely on the parent hash.
-					// Moonbase client-level patch for inconsistent runtime 1200 state.
-					let number = rich_block.inner.header.number.unwrap_or_default();
-					if rich_block.inner.header.parent_hash == H256::default()
-						&& number > U256::zero() {
+				let mut rich_block = rich_block_build(
+					block,
+					statuses.into_iter().map(Option::Some).collect(),
+					Some(hash),
+					full,
+					base_fee,
+				);
 
-							let id = BlockId::Hash(substrate_hash);
-							if let Ok(Some(header)) = client.header(id) {
-								let parent_hash = *header.parent_hash();
+				// Indexers heavily rely on the parent hash.
+				// Moonbase client-level patch for inconsistent runtime 1200 state.
+				let number = rich_block.inner.header.number.unwrap_or_default();
+				if rich_block.inner.header.parent_hash == H256::default() && number > U256::zero() {
+					let id = BlockId::Hash(substrate_hash);
+					if let Ok(Some(header)) = client.header(id) {
+						let parent_hash = *header.parent_hash();
 
-								let parent_id = BlockId::Hash(parent_hash);
-								let schema =
-									frontier_backend_client::onchain_storage_schema::<B, C, BE>(client.as_ref(), parent_id);
-								if let Some(block) = block_data_cache.current_block(schema, parent_hash).await {
-									rich_block.inner.header.parent_hash =
-										H256::from_slice(keccak_256(&rlp::encode(&block.header)).as_slice());
-								}
-							}
+						let parent_id = BlockId::Hash(parent_hash);
+						let schema = frontier_backend_client::onchain_storage_schema::<B, C, BE>(
+							client.as_ref(),
+							parent_id,
+						);
+						if let Some(block) =
+							block_data_cache.current_block(schema, parent_hash).await
+						{
+							rich_block.inner.header.parent_hash = H256::from_slice(
+								keccak_256(&rlp::encode(&block.header)).as_slice(),
+							);
+						}
 					}
-					Ok(Some(rich_block))
-				},
-				_ => Ok(None),
+				}
+				Ok(Some(rich_block))
 			}
-		})
+			_ => Ok(None),
+		}
 	}
 
 	pub fn block_transaction_count_by_hash(&self, hash: H256) -> Result<Option<U256>> {

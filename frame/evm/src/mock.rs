@@ -142,6 +142,4 @@ impl crate::Config for Test {
 	type OnChargeTransaction = ();
 	type BlockHashMapping = crate::SubstrateBlockHashMapping<Self>;
 	type FindAuthor = FindAuthorTruncated;
-
-	type WeightInfo = ();
 }
