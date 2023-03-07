@@ -1,3 +1,5 @@
-hard_tabs = true
-imports_granularity = "Crate"
-use_field_init_shorthand = true
+[toolchain]
+channel    = "nightly-2022-11-15"
+components = ["cargo", "clippy", "rustc", "rustfmt", "rust-src"]
+profile    = "minimal"
+targets    = ["wasm32-unknown-unknown"]
